@@ -65,6 +65,12 @@ runconfig:
               range_spacing: 120
               # LUT spacing in azimuth direction in seconds
               azimuth_spacing: 0.028
+              # Constant azimuth-time re-registration offset in seconds, added
+              # to the azimuth correction LUT. Zero leaves geocoding unchanged;
+              # a non-zero value shifts the burst along track, which is how a
+              # per-platform azimuth timing bias (e.g. between S1C and S1D) is
+              # removed at geocoding time.
+              azimuth_time_offset: 0.0
               # Troposphere delay using weather model
               troposphere:
                  # Type of troposphere delay. Any of 'dry', 'wet' or 'wet_dry' for

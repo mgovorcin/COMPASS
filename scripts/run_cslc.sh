@@ -15,14 +15,17 @@
 #   run_cslc.sh <GRANULE> [options] [-- <extra stage_cslc_inputs.py args>]
 #
 # Options:
-#   --workdir DIR     Run directory (default: ./<GRANULE>).
-#   --image IMAGE     Docker image (default: opera/cslc_s1:final_0.5.7).
-#   --python PY       Python for staging (default: python).
-#   --skip-staging    Reuse inputs already in <workdir>/input_data.
-#   --skip-sas        Only stage; do not run the SAS.
-#   --no-user         Run the container as its default user (do not map host uid).
-#   --docker-arg ARG  Extra `docker run` arg (repeatable).
-#   -h, --help        This help.
+#   --workdir DIR         Run directory (default: ./<GRANULE>).
+#   --image IMAGE         Docker image (default: opera/cslc_s1:final_0.5.7).
+#   --python PY           Python for staging (default: python).
+#   --az-time-offset SEC  Constant azimuth-time re-registration offset (seconds),
+#                         written into the runconfig's correction_luts block.
+#                         Zero/omitted leaves geocoding unchanged.
+#   --skip-staging        Reuse inputs already in <workdir>/input_data.
+#   --skip-sas            Only stage; do not run the SAS.
+#   --no-user             Run the container as its default user (do not map host uid).
+#   --docker-arg ARG      Extra `docker run` arg (repeatable).
+#   -h, --help            This help.
 #
 # Everything after `--` is forwarded to stage_cslc_inputs.py, e.g. to match a
 # golden delivery:
@@ -38,17 +41,19 @@ WORKDIR=""
 RUN_STAGING=1
 RUN_SAS=1
 MAP_USER=1
+AZ_OFFSET=""
 declare -a STAGE_ARGS=()
 declare -a DOCKER_ARGS=()
 GRANULE=""
 
-usage() { sed -n '2,38p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,40p' "${BASH_SOURCE[0]}"; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --workdir)    WORKDIR="$2"; shift 2;;
         --image)      IMAGE="$2"; shift 2;;
         --python)     PYTHON="$2"; shift 2;;
+        --az-time-offset) AZ_OFFSET="$2"; shift 2;;
         --skip-staging) RUN_STAGING=0; shift;;
         --skip-sas)   RUN_SAS=0; shift;;
         --no-user)    MAP_USER=0; shift;;
@@ -81,6 +86,27 @@ if [[ "$RUN_SAS" -eq 0 ]]; then
 fi
 
 [[ -f "$RUNCONFIG" ]] || { echo "ERROR: runconfig not found: $RUNCONFIG" >&2; exit 1; }
+
+if [[ -n "$AZ_OFFSET" ]]; then
+    echo ">>> Setting correction_luts.azimuth_time_offset = $AZ_OFFSET in $RUNCONFIG"
+    "$PYTHON" - "$RUNCONFIG" "$AZ_OFFSET" <<'EOF'
+# Replace any existing correction_luts block (idempotent under --skip-staging
+# reruns) and insert a fresh one before the worker: group.
+import re
+import sys
+
+path, val = sys.argv[1], sys.argv[2]
+text = open(path).read()
+text = re.sub(r"\n {10}correction_luts:\n(?: {12,}.*\n)*", "\n", text)
+block = (
+    "          correction_luts:\n"
+    "              enabled: True\n"
+    f"              azimuth_time_offset: {val}\n"
+)
+text = text.replace("      worker:", block + "      worker:", 1)
+open(path, "w").write(text)
+EOF
+fi
 
 run_args=(--rm -v "$WORKDIR":"$WORKDIR" -w "$WORKDIR")
 if [[ "$MAP_USER" -eq 1 ]]; then

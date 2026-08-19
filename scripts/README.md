@@ -3,6 +3,8 @@
 - **`stage_cslc_inputs.py`** — stage all runconfig inputs for a granule (standalone).
 - **`run_cslc.sh`** — stage, then run the CSLC-S1 SAS (`s1_cslc.py`) in the COMPASS
   Docker image on the generated runconfig.
+- **`run_cslc_per_subswath.sh`** — wraps `run_cslc.sh` to run once per IW subswath,
+  each with its own `--az-time-offset`.
 
 ## stage_cslc_inputs.py
 
@@ -124,3 +126,38 @@ Anything after `--` is forwarded to `stage_cslc_inputs.py`. Options: `--image`
 (default `opera/cslc_s1:final_0.5.7`), `--python`, `--no-user`, `--docker-arg`.
 Requires the COMPASS Docker image built (`./build_docker_image.sh`) and, for
 S1C/S1D, s1-reader >= v0.2.6 in that image (the 2026-06-24 S1C maneuver).
+
+### Azimuth-time offset
+
+`--az-time-offset SEC` patches the generated runconfig's `correction_luts`
+block with a constant azimuth-time re-registration offset (seconds) before
+running the SAS, e.g. to remove a per-platform (S1C/S1D) timing bias:
+
+```bash
+scripts/run_cslc.sh <GRANULE> --workdir DIR --skip-staging --az-time-offset -74.53e-6
+```
+
+Requires the `azimuth_time_offset` key support in `compass/schemas` and
+`compass/utils/lut.py` (see `notebooks/az_offset_demo/` for how it was
+calibrated per subswath).
+
+### Per-subswath offset (`run_cslc_per_subswath.sh`)
+
+`run_cslc.sh --az-time-offset` applies one scalar to every burst in the SAFE,
+because its runconfig has no `burst_id` filter (all subswaths together). To
+apply a *different* offset per IW subswath (as calibrated in
+`notebooks/az_offset_demo/`), use `run_cslc_per_subswath.sh` instead: it stages
+once via `run_cslc.sh --skip-sas`, then for each `ivN=VAL` given, enumerates
+that subswath's burst ids inside the Docker image (`s1reader`), writes a
+runconfig restricted to just those bursts with `azimuth_time_offset: VAL`, and
+runs the SAS on it. The runs share one `product_path`/`scratch_path` (COMPASS
+lays products out per `burst_id/date`, so they don't collide).
+
+```bash
+scripts/run_cslc_per_subswath.sh <GRANULE> --workdir DIR \
+    --az-time-offset iw1=-74.53e-6 iw2=-73.76e-6 iw3=-74.09e-6
+```
+
+Same options as `run_cslc.sh` (`--image`, `--python`, `--skip-staging`,
+`--no-user`, `--docker-arg`), plus `--pol` (default `vv`) for the burst
+enumeration step.
