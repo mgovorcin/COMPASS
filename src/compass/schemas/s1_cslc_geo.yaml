@@ -98,6 +98,10 @@ lut_options:
   range_spacing: num(min=0, required=False)
   # LUT spacing in azimuth direction in seconds
   azimuth_spacing: num(min=0, required=False)
+  # Constant azimuth-time offset added to the azimuth correction LUT, in
+  # seconds. Re-registers the burst in azimuth (e.g. an inter-mission timing
+  # bias); may be negative. Default 0.
+  azimuth_time_offset: num(required=False)
   # Troposphere delay using weather model
   troposphere: include('troposphere_options', required=False)
 

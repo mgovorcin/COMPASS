@@ -20,7 +20,8 @@ def cumulative_correction_luts(burst, dem_path, tec_path,
                                weather_model_path=None,
                                rg_step=200, az_step=0.25,
                                delay_type='dry',
-                               geo2rdr_params=None):
+                               geo2rdr_params=None,
+                               az_time_offset=0.0):
     '''
     Sum correction LUTs and returns cumulative correction LUT in slant range
     and azimuth directions
@@ -47,6 +48,10 @@ def cumulative_correction_luts(burst, dem_path, tec_path,
     delay_type: str
         Type of troposphere delay. Any between 'dry', or 'wet', or
         'wet_dry' for the sum of wet and dry troposphere delays.
+    az_time_offset: float
+        Constant azimuth-time offset added to the azimuth correction LUT, in
+        seconds. Re-registers the burst in azimuth (e.g. an inter-mission
+        timing bias); may be negative. Default 0.
 
     Returns
     -------
@@ -79,8 +84,9 @@ def cumulative_correction_luts(burst, dem_path, tec_path,
     if 'dry' in delay_type:
         rg_lut_data += dry_los_tropo
 
-    # Invert signs to correct for convention
-    az_lut_data = -(bistatic_delay.data + az_fm_mismatch.data)
+    # Invert signs to correct for convention; add the constant azimuth-time
+    # re-registration offset (seconds) on top of the model corrections.
+    az_lut_data = -(bistatic_delay.data + az_fm_mismatch.data) + az_time_offset
 
     rg_lut = isce3.core.LUT2d(bistatic_delay.x_start,
                               bistatic_delay.y_start,

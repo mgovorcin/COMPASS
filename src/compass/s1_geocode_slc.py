@@ -39,6 +39,21 @@ def _wrap_phase(phase_arr):
     return (phase_arr + np.pi) % (2 * np.pi) - np.pi
 
 
+def _constant_az_lut(radar_grid, offset):
+    '''Return a LUT2d holding a constant azimuth-time ``offset`` [s].
+
+    Spans the radar grid in (slant range, azimuth time) so geocode_slc's
+    azimuth-time correction queries return the constant everywhere. Used when
+    model correction LUTs are disabled but an azimuth re-registration offset is
+    still requested.
+    '''
+    rng = np.array([radar_grid.starting_range,
+                    radar_grid.end_range], dtype=np.float64)
+    az = np.array([radar_grid.sensing_start,
+                   radar_grid.sensing_stop], dtype=np.float64)
+    return isce3.core.LUT2d(rng, az, np.full((2, 2), offset, dtype=np.float64))
+
+
 def run(cfg: GeoRunConfig):
     '''
     Run geocode burst workflow with user-defined
@@ -87,6 +102,8 @@ def run(cfg: GeoRunConfig):
 
         # If enabled, get range and azimuth LUTs
         t_corrections = time.perf_counter()
+        # Constant azimuth-time re-registration offset [s] (default 0).
+        az_time_offset = getattr(cfg.lut_params, 'azimuth_time_offset', 0.0)
         if cfg.lut_params.enabled:
             rg_lut, az_lut = \
                 cumulative_correction_luts(burst, dem_path=cfg.dem,
@@ -96,10 +113,14 @@ def run(cfg: GeoRunConfig):
                                            rg_step=cfg.lut_params.range_spacing,
                                            az_step=cfg.lut_params.azimuth_spacing,
                                            delay_type=cfg.tropo_params.delay_type,
-                                           geo2rdr_params=cfg.geo2rdr_params)
+                                           geo2rdr_params=cfg.geo2rdr_params,
+                                           az_time_offset=az_time_offset)
         else:
             rg_lut = isce3.core.LUT2d()
-            az_lut = isce3.core.LUT2d()
+            # Even with model corrections off, honour a requested azimuth offset
+            # by feeding geocode_slc a constant azimuth-time LUT.
+            az_lut = _constant_az_lut(burst.as_isce3_radargrid(), az_time_offset) \
+                if az_time_offset else isce3.core.LUT2d()
         dt_corrections = get_time_delta_str(t_corrections)
 
         radar_grid = burst.as_isce3_radargrid()
