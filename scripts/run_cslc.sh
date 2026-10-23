@@ -18,9 +18,18 @@
 #   --workdir DIR         Run directory (default: ./<GRANULE>).
 #   --image IMAGE         Docker image (default: opera/cslc_s1:final_0.5.7).
 #   --python PY           Python for staging (default: python).
-#   --az-time-offset SEC  Constant azimuth-time re-registration offset (seconds),
-#                         written into the runconfig's correction_luts block.
-#                         Zero/omitted leaves geocoding unchanged.
+#   --az-timing MODE      Azimuth timing correction: none, carrier_phase or
+#                         geometry. Offsets come from the timing table (the one
+#                         packaged with COMPASS unless --timing-table is given),
+#                         or from --az-time-offset.
+#   --range-timing MODE   Range timing correction: none or geometry.
+#   --timing-table FILE   OPERA_S1_AUX_TIMING table (copied into the workdir so
+#                         the container sees it).
+#   --az-time-offset SEC  Constant azimuth-time offset (seconds) for every burst
+#                         instead of the table. Without --az-timing it is a
+#                         geometry shift, as before.
+#   (The timing options need an image built from a COMPASS with
+#    processing.timing_correction.)
 #   --skip-staging        Reuse inputs already in <workdir>/input_data.
 #   --skip-sas            Only stage; do not run the SAS.
 #   --no-user             Run the container as its default user (do not map host uid).
@@ -42,11 +51,14 @@ RUN_STAGING=1
 RUN_SAS=1
 MAP_USER=1
 AZ_OFFSET=""
+AZ_TIMING=""
+RANGE_TIMING=""
+TIMING_TABLE=""
 declare -a STAGE_ARGS=()
 declare -a DOCKER_ARGS=()
 GRANULE=""
 
-usage() { sed -n '2,40p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,46p' "${BASH_SOURCE[0]}"; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -54,6 +66,9 @@ while [[ $# -gt 0 ]]; do
         --image)      IMAGE="$2"; shift 2;;
         --python)     PYTHON="$2"; shift 2;;
         --az-time-offset) AZ_OFFSET="$2"; shift 2;;
+        --az-timing)  AZ_TIMING="$2"; shift 2;;
+        --range-timing) RANGE_TIMING="$2"; shift 2;;
+        --timing-table) TIMING_TABLE="$2"; shift 2;;
         --skip-staging) RUN_STAGING=0; shift;;
         --skip-sas)   RUN_SAS=0; shift;;
         --no-user)    MAP_USER=0; shift;;
@@ -87,23 +102,44 @@ fi
 
 [[ -f "$RUNCONFIG" ]] || { echo "ERROR: runconfig not found: $RUNCONFIG" >&2; exit 1; }
 
-if [[ -n "$AZ_OFFSET" ]]; then
-    echo ">>> Setting correction_luts.azimuth_time_offset = $AZ_OFFSET in $RUNCONFIG"
-    "$PYTHON" - "$RUNCONFIG" "$AZ_OFFSET" <<'EOF'
-# Replace any existing correction_luts block (idempotent under --skip-staging
-# reruns) and insert a fresh one before the worker: group.
+# Constant offset without a mode keeps the old meaning: a geometry shift
+if [[ -n "$AZ_OFFSET" && -z "$AZ_TIMING" ]]; then
+    AZ_TIMING=geometry
+fi
+if [[ -n "$TIMING_TABLE" ]]; then
+    cp "$TIMING_TABLE" "$WORKDIR/"
+    TIMING_TABLE="$WORKDIR/$(basename "$TIMING_TABLE")"
+fi
+
+if [[ -n "$AZ_TIMING$RANGE_TIMING$TIMING_TABLE" ]]; then
+    echo ">>> Setting processing.timing_correction in $RUNCONFIG" \
+         "(azimuth=${AZ_TIMING:-none}, range=${RANGE_TIMING:-none}," \
+         "offset=${AZ_OFFSET:-table}, table=${TIMING_TABLE:-packaged})"
+    "$PYTHON" - "$RUNCONFIG" "${AZ_TIMING:-none}" "${RANGE_TIMING:-none}" \
+        "$AZ_OFFSET" "$TIMING_TABLE" <<'EOF'
+# Replace any existing timing_correction block and timing_table_file line
+# (idempotent under --skip-staging reruns) and insert fresh ones.
 import re
 import sys
 
-path, val = sys.argv[1], sys.argv[2]
+path, az_mode, rg_mode, az_offset, table = sys.argv[1:6]
 text = open(path).read()
-text = re.sub(r"\n {10}correction_luts:\n(?: {12,}.*\n)*", "\n", text)
+text = re.sub(r"\n {10}timing_correction:\n(?: {12,}.*\n)*", "\n", text)
+text = re.sub(r" {10}timing_table_file:.*\n", "", text)
 block = (
-    "          correction_luts:\n"
-    "              enabled: True\n"
-    f"              azimuth_time_offset: {val}\n"
+    "          timing_correction:\n"
+    f"              azimuth_mode: {az_mode}\n"
+    f"              range_mode: {rg_mode}\n"
 )
-text = text.replace("      worker:", block + "      worker:", 1)
+if az_offset:
+    block += ("              offset_source: constant\n"
+              f"              azimuth_constant_offset: {az_offset}\n")
+text = text.replace("      worker:", block + "\n      worker:", 1)
+if table:
+    text = text.replace(
+        "      static_ancillary_file_group:\n",
+        "      static_ancillary_file_group:\n"
+        f"          timing_table_file: {table}\n", 1)
 open(path, "w").write(text)
 EOF
 fi

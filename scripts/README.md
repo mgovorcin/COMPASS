@@ -144,19 +144,29 @@ Anything after `--` is forwarded to `stage_cslc_inputs.py`. Options: `--image`
 Requires the COMPASS Docker image built (`./build_docker_image.sh`) and, for
 S1C/S1D, s1-reader >= v0.2.6 in that image (the 2026-06-24 S1C maneuver).
 
-### Azimuth-time offset
+### Timing correction (S1 AUX_INS / AUX_ITC)
 
-`--az-time-offset SEC` patches the generated runconfig's `correction_luts`
-block with a constant azimuth-time re-registration offset (seconds) before
-running the SAS, e.g. to remove a per-platform (S1C/S1D) timing bias:
+The run options set the runconfig's `processing.timing_correction` group before
+running the SAS:
 
 ```bash
-scripts/run_cslc.sh <GRANULE> --workdir DIR --skip-staging --az-time-offset -74.53e-6
+# S1D relative to S1C, from the table packaged with COMPASS, phase only
+scripts/run_cslc.sh <GRANULE> --workdir DIR --skip-staging --az-timing carrier_phase
+
+# the same from your own table (built with s1_timing_table.py)
+scripts/run_cslc.sh <GRANULE> --workdir DIR --skip-staging --az-timing carrier_phase \
+    --timing-table OPERA_S1_AUX_TIMING_S1C-REF_G20261023T000000.json
+
+# a constant offset for every burst; geometry unless --az-timing says otherwise
+scripts/run_cslc.sh <GRANULE> --workdir DIR --skip-staging --az-time-offset 4.6614e-5
 ```
 
-Requires the `azimuth_time_offset` key support in `compass/schemas` and
-`compass/utils/lut.py` (see `notebooks/az_offset_demo/` for how it was
-calibrated per subswath).
+`carrier_phase` changes only the azimuth carrier phase (burst-overlap phase) and
+leaves geolocation alone, which is what the S1 platform timing bias needs;
+`geometry` shifts the data along track. `--range-timing geometry` applies the
+table's range term. The image must be built from a COMPASS that has
+`processing.timing_correction`; `correction_luts.azimuth_time_offset` is
+deprecated (still accepted, as a constant geometry offset).
 
 ### Per-subswath offset (`run_cslc_per_subswath.sh`)
 
