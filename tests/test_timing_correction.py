@@ -8,6 +8,7 @@ are small and live in tests/data/aux_itc.
 import datetime
 import json
 import pathlib
+import types
 
 import pytest
 
@@ -312,3 +313,154 @@ def test_cli_help():
     with pytest.raises(SystemExit) as err:
         tc.main(['--help'])
     assert err.value.code == 0
+
+
+# --------------------------------------------------------------------------- #
+# per-burst resolution
+# --------------------------------------------------------------------------- #
+def burst(platform='S1D', aux_ins_name=AUX_INS['S1D'], sensing_start=WHEN):
+    '''The three attributes resolve_burst_timing reads off a burst'''
+    return types.SimpleNamespace(platform_id=platform,
+                                 aux_ins_name=aux_ins_name,
+                                 sensing_start=sensing_start)
+
+
+def params(**kwargs):
+    '''processing.timing_correction with the shipped defaults'''
+    p = dict(azimuth_mode='none', range_mode='none', offset_source='table',
+             azimuth_constant_offset=0.0, range_constant_offset=0.0,
+             on_uncovered='error')
+    p.update(kwargs)
+    return types.SimpleNamespace(**p)
+
+
+@pytest.fixture
+def table(tmp_path):
+    return written(tmp_path, s1d_table())
+
+
+def test_resolve_defaults_request_nothing(table):
+    timing = tc.resolve_burst_timing(burst(), params(), table)
+    assert timing == tc.BurstTiming()
+    assert timing.status == 'not requested'
+
+
+def test_resolve_carrier_phase_from_table(table):
+    timing = tc.resolve_burst_timing(
+        burst(), params(azimuth_mode='carrier_phase'), table)
+    assert timing.azimuth_offset == pytest.approx(46.614e-6, abs=1e-12)
+    assert timing.carrier_phase_azimuth_offset == timing.azimuth_offset
+    assert timing.geometry_azimuth_offset == 0.0
+    assert timing.geometry_range_offset_meters == 0.0
+    assert timing.source == 'table'
+    assert timing.table_name == table.name
+    assert timing.reference_platform == 'S1C'
+    assert timing.status == 'applied'
+
+
+def test_resolve_geometry_routes_to_the_lut(table):
+    timing = tc.resolve_burst_timing(
+        burst(), params(azimuth_mode='geometry'), table)
+    assert timing.geometry_azimuth_offset == pytest.approx(46.614e-6,
+                                                           abs=1e-12)
+    assert timing.carrier_phase_azimuth_offset == 0.0
+
+
+def test_resolve_axes_are_independent(table):
+    '''Asking for range only must not apply the azimuth correction'''
+    timing = tc.resolve_burst_timing(
+        burst(), params(range_mode='geometry'), table)
+    assert timing.azimuth_mode == 'none'
+    assert timing.azimuth_offset == 0.0
+    assert timing.range_mode == 'geometry'
+    assert timing.range_offset == 0.0    # S1D vs S1C ITC range is 0 today
+
+
+def test_range_offset_in_meters_is_half_the_two_way_light_time():
+    timing = tc.BurstTiming(range_mode='geometry', range_offset=2e-9)
+    assert timing.geometry_range_offset_meters == pytest.approx(
+        299792458.0 * 1e-9)
+    assert tc.BurstTiming(range_offset=2e-9).geometry_range_offset_meters == 0
+
+
+def test_resolve_platform_not_in_table(table):
+    timing = tc.resolve_burst_timing(
+        burst('S1C', AUX_INS['S1C']), params(azimuth_mode='carrier_phase'),
+        table)
+    assert timing.azimuth_offset == 0.0
+    assert timing.azimuth_mode == 'carrier_phase'
+    assert timing.status == 'S1C not corrected by the table'
+
+
+def test_resolve_uncovered_errors_by_default(table):
+    with pytest.raises(tc.UncoveredBurstError, match='derived for'):
+        tc.resolve_burst_timing(burst(aux_ins_name='S1D_AUX_INS_other'),
+                                params(azimuth_mode='carrier_phase'), table)
+
+
+def test_resolve_uncovered_warn_applies_nothing(table):
+    timing = tc.resolve_burst_timing(
+        burst(aux_ins_name='S1D_AUX_INS_other'),
+        params(azimuth_mode='carrier_phase', on_uncovered='warn'), table)
+    assert timing.azimuth_offset == 0.0
+    assert timing.status.startswith('uncovered, not applied')
+
+
+def test_resolve_constant_ignores_table():
+    timing = tc.resolve_burst_timing(
+        burst('S1A'), params(azimuth_mode='geometry', range_mode='geometry',
+                             offset_source='constant',
+                             azimuth_constant_offset=1e-5,
+                             range_constant_offset=3e-9))
+    assert timing.azimuth_offset == 1e-5
+    assert timing.range_offset == 3e-9
+    assert timing.source == 'constant'
+    assert timing.table_name is None
+
+
+def test_resolve_constant_only_for_requested_axis():
+    timing = tc.resolve_burst_timing(
+        burst(), params(azimuth_mode='carrier_phase', offset_source='constant',
+                        azimuth_constant_offset=1e-5,
+                        range_constant_offset=3e-9))
+    assert timing.range_offset == 0.0
+
+
+def test_resolve_table_source_without_table():
+    with pytest.raises(ValueError, match='no timing table was loaded'):
+        tc.resolve_burst_timing(burst(), params(azimuth_mode='geometry'))
+
+
+def lut_params(offset):
+    return types.SimpleNamespace(azimuth_time_offset=offset)
+
+
+def test_normalize_leaves_new_style_alone():
+    p = params(azimuth_mode='carrier_phase')
+    assert tc.normalize_timing_params(p, lut_params(0.0)) == \
+        params(azimuth_mode='carrier_phase')
+
+
+def test_normalize_maps_deprecated_offset_to_constant_geometry():
+    p, lut = params(), lut_params(2e-5)
+    tc.normalize_timing_params(p, lut)
+    assert (p.azimuth_mode, p.offset_source, p.azimuth_constant_offset) == \
+        ('geometry', 'constant', 2e-5)
+    # cleared, so the LUT builder cannot add it a second time
+    assert lut.azimuth_time_offset == 0.0
+    assert tc.resolve_burst_timing(burst(), p).geometry_azimuth_offset == 2e-5
+
+
+def test_normalize_refuses_both_styles():
+    with pytest.raises(ValueError, match='deprecated and cannot be combined'):
+        tc.normalize_timing_params(params(range_mode='geometry'),
+                                   lut_params(2e-5))
+
+
+def test_packaged_table_is_the_s1d_production_table():
+    table = tc.load_timing_table(tc.DEFAULT_TIMING_TABLE)
+    assert table.reference_platform == 'S1C'
+    assert table.platforms == ['S1D']
+    assert table.entries[0].azimuth_time_correction == pytest.approx(
+        46.614e-6, abs=1e-12)
+    assert table.entries[0].aux_ins == (AUX_INS['S1D'],)

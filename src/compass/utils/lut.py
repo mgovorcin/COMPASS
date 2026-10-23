@@ -21,7 +21,8 @@ def cumulative_correction_luts(burst, dem_path, tec_path,
                                rg_step=200, az_step=0.25,
                                delay_type='dry',
                                geo2rdr_params=None,
-                               az_time_offset=0.0):
+                               az_time_offset=0.0,
+                               rg_offset=0.0):
     '''
     Sum correction LUTs and returns cumulative correction LUT in slant range
     and azimuth directions
@@ -53,6 +54,9 @@ def cumulative_correction_luts(burst, dem_path, tec_path,
         azimuth correction LUT. Zero (the default) leaves geocoding unchanged.
         A non-zero value shifts the burst along track by that much azimuth
         time, which is how a per-platform azimuth timing bias is removed.
+    rg_offset: float
+        Constant slant-range offset in meters, added to the slant range
+        correction LUT. Zero (the default) leaves geocoding unchanged.
 
     Returns
     -------
@@ -84,6 +88,11 @@ def cumulative_correction_luts(burst, dem_path, tec_path,
         rg_lut_data += wet_los_tropo
     if 'dry' in delay_type:
         rg_lut_data += dry_los_tropo
+
+    # A constant range timing offset is, like az_time_offset below, a
+    # spatially uniform term in its LUT
+    if rg_offset:
+        rg_lut_data = rg_lut_data + rg_offset
 
     # Invert signs to correct for convention
     az_lut_data = -(bistatic_delay.data + az_fm_mismatch.data)

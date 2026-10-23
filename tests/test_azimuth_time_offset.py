@@ -3,7 +3,7 @@ Test the constant azimuth-time re-registration offset
 
 The offset rides on the azimuth correction LUT. When the model LUTs are
 enabled it is added to their data (see utils/lut.py); when they are disabled
-geocode_slc still needs a LUT to query, which is what _constant_az_lut builds.
+geocode_slc still needs a LUT to query, which is what _constant_lut builds.
 '''
 import types
 
@@ -11,7 +11,7 @@ import isce3
 import numpy as np
 import pytest
 
-from compass.s1_geocode_slc import _constant_az_lut
+from compass.s1_geocode_slc import _constant_lut
 
 
 def radar_grid():
@@ -24,9 +24,9 @@ def radar_grid():
     )
 
 
-def test_constant_az_lut_spans_the_grid():
+def test_constant_lut_spans_the_grid():
     '''The LUT covers the burst, so no query falls outside it.'''
-    lut = _constant_az_lut(radar_grid(), 0.25)
+    lut = _constant_lut(radar_grid(), 0.25)
 
     assert isinstance(lut, isce3.core.LUT2d)
     assert (lut.x_start, lut.x_end) == (800_000.0, 900_000.0)
@@ -38,11 +38,11 @@ def test_constant_az_lut_spans_the_grid():
     'slant_range, azimuth_time',
     [(800_000.0, 0.0), (850_000.0, 1.5), (900_000.0, 3.0)],
 )
-def test_constant_az_lut_returns_the_offset_everywhere(
+def test_constant_lut_returns_the_offset_everywhere(
     offset, slant_range, azimuth_time
 ):
     '''A re-registration is uniform: same shift at every pixel, sign kept.'''
-    lut = _constant_az_lut(radar_grid(), offset)
+    lut = _constant_lut(radar_grid(), offset)
 
     assert lut.eval(azimuth_time, slant_range) == pytest.approx(offset)
 

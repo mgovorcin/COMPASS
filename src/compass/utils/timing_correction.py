@@ -19,8 +19,10 @@ generations it was derived for; a burst focused with any other generation is
 "uncovered", which is how a new ESA generation, or an IPF that starts applying
 the bias itself, is caught instead of being corrected twice.
 
-The SAS only reads tables (``load_timing_table``, ``TimingTable.lookup``);
-``build_timing_table`` and ``main`` are offline tools that make them.
+The SAS only reads tables (``load_timing_table``, ``TimingTable.lookup``) and
+turns the runconfig ``processing.timing_correction`` group into one decision
+per burst (``resolve_burst_timing``); ``build_timing_table`` and ``main`` are
+offline tools that make tables.
 '''
 from __future__ import annotations
 
@@ -31,6 +33,8 @@ import os
 import re
 from dataclasses import dataclass, field
 
+import journal
+
 PRODUCT_TYPE = 'OPERA_S1_AUX_TIMING'
 CONVENTION = ('seconds; added to the burst azimuth time (range: two-way range '
               'time); correction = -(T_platform - T_reference)')
@@ -40,6 +44,17 @@ CONVENTION = ('seconds; added to the burst azimuth time (range: two-way range '
 # applies it at focusing and adding it again would double-count.
 RANGE_COMPONENTS = ('rangeCalibration', 'swstBias')
 DEFAULT_RANGE_COMPONENTS = ('rangeCalibration',)
+
+# The table shipped with COMPASS, used when the runconfig names none
+DEFAULT_TIMING_TABLE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data',
+    'OPERA_S1_AUX_TIMING_S1C-REF_G20261023T000000.json')
+
+# Runconfig choices. 'none' rather than 'off': YAML 1.1 reads off as False.
+AZIMUTH_MODES = ('none', 'carrier_phase', 'geometry')
+RANGE_MODES = ('none', 'geometry')
+
+_SPEED_OF_LIGHT = 299792458.0
 
 # IW channels whose values must agree before one instrument-wide number is used
 _IW_CHANNELS = [(swath, pol) for swath in ('iw1', 'iw2', 'iw3')
@@ -518,6 +533,169 @@ def load_timing_table(path):
         reference_platform=reference,
         entries=entries,
     )
+
+
+@dataclass(frozen=True)
+class BurstTiming:
+    '''
+    The timing correction decided for one burst
+
+    Attributes
+    ----------
+    azimuth_mode: str
+        One of AZIMUTH_MODES
+    azimuth_offset: float
+        Azimuth time offset [s]; 0 unless azimuth_mode is not 'none'
+    range_mode: str
+        One of RANGE_MODES
+    range_offset: float
+        Two-way range time offset [s]; 0 unless range_mode is not 'none'
+    source: str
+        'none', 'constant' or 'table'
+    table_name: str or None
+        Name of the table the offsets came from
+    reference_platform: str or None
+        Platform the table's corrections are relative to
+    status: str
+        Why the offsets are what they are, for the product metadata
+    '''
+    azimuth_mode: str = 'none'
+    azimuth_offset: float = 0.0
+    range_mode: str = 'none'
+    range_offset: float = 0.0
+    source: str = 'none'
+    table_name: str | None = None
+    reference_platform: str | None = None
+    status: str = 'not requested'
+
+    @property
+    def geometry_azimuth_offset(self):
+        '''Offset [s] for the azimuth correction LUT (geometry mode only)'''
+        return self.azimuth_offset if self.azimuth_mode == 'geometry' else 0.0
+
+    @property
+    def carrier_phase_azimuth_offset(self):
+        '''Offset [s] for the azimuth carrier (carrier_phase mode only)'''
+        return (self.azimuth_offset if self.azimuth_mode == 'carrier_phase'
+                else 0.0)
+
+    @property
+    def geometry_range_offset_meters(self):
+        '''Slant-range offset [m] for the range correction LUT, c * dt / 2'''
+        if self.range_mode != 'geometry':
+            return 0.0
+        return _SPEED_OF_LIGHT * self.range_offset / 2.0
+
+
+def is_timing_requested(timing_params):
+    '''True if either axis asks for a correction'''
+    return (timing_params.azimuth_mode != 'none'
+            or timing_params.range_mode != 'none')
+
+
+def normalize_timing_params(timing_params, lut_params):
+    '''
+    Fold the deprecated correction_luts.azimuth_time_offset into
+    timing_correction, in place
+
+    A nonzero azimuth_time_offset means what it always did: a constant
+    geometry offset. It cannot be combined with a timing_correction request,
+    since the two would disagree on where the offset comes from.
+
+    Parameters
+    ----------
+    timing_params: types.SimpleNamespace
+        processing.timing_correction
+    lut_params: types.SimpleNamespace
+        processing.correction_luts
+
+    Returns
+    -------
+    types.SimpleNamespace
+        timing_params, for convenience
+    '''
+    legacy = getattr(lut_params, 'azimuth_time_offset', 0.0) or 0.0
+    if not legacy:
+        return timing_params
+    if is_timing_requested(timing_params):
+        raise ValueError(
+            'correction_luts.azimuth_time_offset is deprecated and cannot be '
+            'combined with processing.timing_correction; set '
+            'timing_correction.azimuth_mode: geometry, offset_source: constant, '
+            'azimuth_constant_offset instead')
+    journal.warning('timing_correction.normalize_timing_params').log(
+        'correction_luts.azimuth_time_offset is deprecated; applying it as '
+        'timing_correction azimuth_mode: geometry, offset_source: constant')
+    timing_params.azimuth_mode = 'geometry'
+    timing_params.offset_source = 'constant'
+    timing_params.azimuth_constant_offset = float(legacy)
+    lut_params.azimuth_time_offset = 0.0
+    return timing_params
+
+
+def resolve_burst_timing(burst, timing_params, table=None):
+    '''
+    Decide the timing correction for one burst
+
+    Parameters
+    ----------
+    burst: Sentinel1BurstSlc
+        Burst to correct; platform_id, sensing_start and aux_ins_name are read
+    timing_params: types.SimpleNamespace
+        processing.timing_correction, after normalize_timing_params
+    table: TimingTable or None
+        Required when offset_source is 'table' and a mode is requested
+
+    Returns
+    -------
+    BurstTiming
+
+    Raises
+    ------
+    UncoveredBurstError
+        The table corrects the burst's platform but not this burst, and
+        on_uncovered is 'error'
+    '''
+    if not is_timing_requested(timing_params):
+        return BurstTiming()
+
+    az_mode = timing_params.azimuth_mode
+    rg_mode = timing_params.range_mode
+
+    def pick(az_value, rg_value, **kwargs):
+        return BurstTiming(
+            azimuth_mode=az_mode,
+            azimuth_offset=float(az_value) if az_mode != 'none' else 0.0,
+            range_mode=rg_mode,
+            range_offset=float(rg_value) if rg_mode != 'none' else 0.0,
+            **kwargs)
+
+    if timing_params.offset_source == 'constant':
+        return pick(timing_params.azimuth_constant_offset,
+                    timing_params.range_constant_offset,
+                    source='constant', status='applied')
+
+    if table is None:
+        raise ValueError('offset_source is table but no timing table was '
+                         'loaded')
+    common = dict(source='table', table_name=table.name,
+                  reference_platform=table.reference_platform)
+    try:
+        entry = table.lookup(burst.platform_id, burst.sensing_start,
+                             burst.aux_ins_name)
+    except UncoveredBurstError as err:
+        if timing_params.on_uncovered == 'error':
+            raise
+        journal.warning('timing_correction.resolve_burst_timing').log(
+            f'{err}; no timing correction applied')
+        return pick(0.0, 0.0, status=f'uncovered, not applied: {err}',
+                    **common)
+
+    if entry is None:
+        return pick(0.0, 0.0, status=f'{burst.platform_id} not corrected by '
+                                     'the table', **common)
+    return pick(entry.azimuth_time_correction, entry.range_time_correction,
+                status='applied', **common)
 
 
 def _platform_window(text):
