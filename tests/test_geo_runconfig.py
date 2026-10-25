@@ -45,6 +45,8 @@ def s1a_table(tmp_path, aux_ins):
     '''A table that corrects S1A, derived for the given AUX_INS names'''
     with open(tc.DEFAULT_TIMING_TABLE) as f:
         raw = json.load(f)
+    # the current-generation entry (+46.614 us), relabelled
+    raw['entries'] = raw['entries'][-1:]
     raw['entries'][0].update(platform='S1A', auxIns=aux_ins)
     path = tmp_path / 'table.json'
     path.write_text(json.dumps(raw))
@@ -65,7 +67,7 @@ def test_table_mode_loads_packaged_table(geocode_slc_params, tmp_path):
     cfg = load(write_cfg(geocode_slc_params, tmp_path,
                          timing={'azimuth_mode': 'carrier_phase'}))
     assert cfg.timing_table.name == \
-        'OPERA_S1_AUX_TIMING_S1C-REF_G20261023T000000'
+        'OPERA_S1_AUX_TIMING_S1C-REF_G20261024T000000'
     # the test burst is S1A, which the packaged table does not correct
     timing = tc.resolve_burst_timing(cfg.bursts[0], cfg.timing_params,
                                      cfg.timing_table)

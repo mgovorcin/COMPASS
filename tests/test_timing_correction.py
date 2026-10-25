@@ -112,10 +112,79 @@ def test_build_is_deterministic(tmp_path):
     assert pathlib.Path(b).read_bytes() == first
 
 
-def test_also_accept_aux_ins_extends_coverage():
-    older = 'S1D_AUX_INS_V20260319T000000_G20260101T000000'
-    entry = s1d_table(also_accept_aux_ins={'S1D': [older]})['entries'][0]
-    assert entry['auxIns'] == [AUX_INS['S1D'], older]
+def write_aux_ins_zip(directory, name, azimuth_time_bias, swst_bias):
+    '''A minimal AUX_INS .SAFE.zip: every IW channel, the given values'''
+    import zipfile
+
+    import lxml.etree as ET
+
+    root = ET.Element('auxiliaryInstrument')
+    lst = ET.SubElement(root, 'internalCalibrationParamsList')
+    for swath in ('IW1', 'IW2', 'IW3'):
+        for pol in ('VV', 'VH', 'HH', 'HV'):
+            e = ET.SubElement(lst, 'internalCalibrationParams')
+            ET.SubElement(e, 'swath').text = swath
+            ET.SubElement(e, 'polarisation').text = pol
+            ET.SubElement(e, 'azimuthTimeBias').text = repr(azimuth_time_bias)
+            ET.SubElement(e, 'swstBias').text = repr(swst_bias)
+    path = directory / f'{name}.SAFE.zip'
+    with zipfile.ZipFile(path, 'w') as z:
+        z.writestr(f'{name}.SAFE/data/{name[:3].lower()}-aux-ins.xml',
+                   ET.tostring(root))
+    return str(path)
+
+
+#: S1D AUX_INS generations as SAR-MPC serves them (FINDINGS 17): two
+#: commissioning files with swstBias 0, two with S1A's swstBias, then the
+#: -66.299 us generations
+S1D_HISTORY = [
+    ('S1D_AUX_INS_V20251104T000000_G20251029T103833', 0.0, 0.0),
+    ('S1D_AUX_INS_V20251104T000000_G20251217T143440', 0.0, -8.2256909e-09),
+    ('S1D_AUX_INS_V20260319T000000_G20260318T105812', 0.0, -8.2256909e-09),
+    ('S1D_AUX_INS_V20260319T000000_G20260415T150144', -6.6299e-05,
+     -6.4576909e-09),
+]
+
+
+@pytest.fixture
+def s1d_history(tmp_path):
+    '''Every S1D generation above plus the vendored current one'''
+    paths = [write_aux_ins_zip(tmp_path, *g) for g in S1D_HISTORY]
+    return paths + [str(AUX_INS_DIR / f'{AUX_INS["S1D"]}.SAFE.zip')]
+
+
+def history_table(s1d_history):
+    files = [str(AUX_INS_DIR / f'{AUX_INS["S1C"]}.SAFE.zip'),
+             str(AUX_ITC_DIR / f'{AUX_ITC["S1C"]}.SAFE.zip'),
+             str(AUX_ITC_DIR / f'{AUX_ITC["S1D"]}.SAFE.zip'), *s1d_history]
+    return tc.build_timing_table(files, 'S1C', ['S1D'], GENERATION)
+
+
+def test_one_entry_per_distinct_generation_values(s1d_history):
+    '''The IPF applies the AUX_INS bias of the generation that focused a
+    product (V10), so bias-0 S1D products need a different correction from
+    the -66.299 us ones: -(0 - (-19.685)) = -19.685 us against +46.614 us.'''
+    entries = history_table(s1d_history)['entries']
+    assert [e['auxIns'] for e in entries] == [
+        ['S1D_AUX_INS_V20251104T000000_G20251029T103833'],
+        ['S1D_AUX_INS_V20251104T000000_G20251217T143440',
+         'S1D_AUX_INS_V20260319T000000_G20260318T105812'],
+        ['S1D_AUX_INS_V20260319T000000_G20260415T150144', AUX_INS['S1D']],
+    ]
+    az = [e['azimuthTimeCorrection'] for e in entries]
+    assert az == pytest.approx([-19.685e-6, -19.685e-6, 46.614e-6], abs=1e-12)
+    assert entries[0]['components']['swstBias'] == 0.0
+
+
+def test_history_table_round_trips_and_looks_up(tmp_path, s1d_history):
+    '''Entries share validity but not generations, which the loader accepts,
+    and each burst finds the entry for the generation that focused it'''
+    table = written(tmp_path, history_table(s1d_history))
+    assert len(table.entries) == 3
+    old = table.lookup('S1D', WHEN, 'S1D_AUX_INS_V20251104T000000_G20251217T143440')
+    new = table.lookup('S1D', WHEN, AUX_INS['S1D'])
+    assert old.azimuth_time_correction == pytest.approx(-19.685e-6, abs=1e-12)
+    assert new.azimuth_time_correction == pytest.approx(46.614e-6, abs=1e-12)
 
 
 @pytest.mark.parametrize('kwargs,match', [
@@ -133,12 +202,28 @@ def test_build_rejects_bad_requests(kwargs, match):
         tc.build_timing_table(**args)
 
 
-def test_build_rejects_two_generations_of_one_product():
-    files = aux_files('S1C', 'S1D') + [
-        str(AUX_INS_DIR / f'{AUX_INS["S1D"]}.SAFE.zip').replace(
-            'G20260603T113743', 'G20260101T000000')]
-    with pytest.raises(ValueError, match='Two AUX_INS products for S1D'):
-        tc.build_timing_table(files, 'S1C', ['S1D'], GENERATION)
+def test_build_rejects_two_reference_generations(tmp_path):
+    '''The reference total must be one value: the generation its products
+    carry'''
+    other = write_aux_ins_zip(
+        tmp_path, 'S1C_AUX_INS_V20250224T000000_G20250324T091341', 0.0,
+        -8.2256909e-09)
+    with pytest.raises(ValueError, match='exactly one AUX_INS for the '
+                                         'reference S1C'):
+        tc.build_timing_table(aux_files('S1C', 'S1D') + [other], 'S1C',
+                              ['S1D'], GENERATION)
+
+
+@pytest.mark.parametrize('extra,match', [
+    (str(AUX_INS_DIR / 'S1D_AUX_INS_V20260319T000000_G20260603T113743.SAFE.zip'),
+     'given twice'),
+    (str(AUX_ITC_DIR / 'S1D_AUX_ITC_V20260319T000000_G20260318T105930.SAFE.zip'),
+     'Two AUX_ITC products for S1D'),
+])
+def test_build_rejects_duplicate_inputs(extra, match):
+    with pytest.raises(ValueError, match=match):
+        tc.build_timing_table(aux_files('S1C', 'S1D') + [extra], 'S1C',
+                              ['S1D'], GENERATION)
 
 
 @pytest.mark.parametrize('name', ['S1D_AUX_CAL_V20260319T000000_G20260318T105930',
@@ -200,7 +285,8 @@ def raw_table(tmp_path, mutate):
      'rangeComponents'),
     (lambda t: t['entries'][0].update(platform='S1C'),
      'S1C is the reference platform'),
-    (lambda t: t['entries'].append(dict(t['entries'][0])), 'overlap'),
+    (lambda t: t['entries'].append(dict(t['entries'][0])),
+     'claim .* with overlapping validity'),
 ])
 def test_load_rejects_invalid_tables(tmp_path, mutate, match):
     with pytest.raises(ValueError, match=match):
@@ -252,7 +338,8 @@ def test_lookup_refuses_other_aux_ins_generation(tmp_path, aux_ins_name):
     '''A generation the entry was not derived for -- ESA revised the file, or
     the IPF started applying the bias -- must not be corrected silently.'''
     table = written(tmp_path, s1d_table())
-    with pytest.raises(tc.UncoveredBurstError, match='derived for'):
+    with pytest.raises(tc.UncoveredBurstError, match='entries were derived '
+                                                     'for'):
         table.lookup('S1D', WHEN, aux_ins_name)
 
 
@@ -286,13 +373,15 @@ def test_cli_builds_the_production_table(tmp_path, capsys):
         46.614e-6, abs=1e-12)
 
 
-def test_cli_also_accept_groups_by_platform(tmp_path):
-    older = 'S1D_AUX_INS_V20260319T000000_G20260101T000000'
-    path = tc.main([*aux_files('S1C', 'S1D'), '--reference', 'S1C',
-                    '--apply', 'S1D', '--generation', '2026-10-23',
-                    '--also-accept-aux-ins', older, '-o', str(tmp_path)])
-    assert tc.load_timing_table(path).entries[0].aux_ins == (AUX_INS['S1D'],
-                                                             older)
+def test_cli_takes_every_generation(tmp_path, s1d_history):
+    files = [str(AUX_INS_DIR / f'{AUX_INS["S1C"]}.SAFE.zip'),
+             str(AUX_ITC_DIR / f'{AUX_ITC["S1C"]}.SAFE.zip'),
+             str(AUX_ITC_DIR / f'{AUX_ITC["S1D"]}.SAFE.zip'), *s1d_history]
+    out = tmp_path / 'out'
+    out.mkdir()
+    path = tc.main([*files, '--reference', 'S1C', '--apply', 'S1D',
+                    '--generation', '2026-10-23', '-o', str(out)])
+    assert len(tc.load_timing_table(path).entries) == 3
 
 
 @pytest.mark.parametrize('argv', [
@@ -458,9 +547,15 @@ def test_normalize_refuses_both_styles():
 
 
 def test_packaged_table_is_the_s1d_production_table():
+    '''S1D relative to S1C, every S1D AUX_INS generation on SAR-MPC: the
+    bias-0 ones at -19.685 us, the -66.299 us ones at +46.614 us'''
     table = tc.load_timing_table(tc.DEFAULT_TIMING_TABLE)
     assert table.reference_platform == 'S1C'
     assert table.platforms == ['S1D']
-    assert table.entries[0].azimuth_time_correction == pytest.approx(
-        46.614e-6, abs=1e-12)
-    assert table.entries[0].aux_ins == (AUX_INS['S1D'],)
+    by_gen = {n: e.azimuth_time_correction
+              for e in table.entries for n in e.aux_ins}
+    assert len(by_gen) == 9
+    assert by_gen[AUX_INS['S1D']] == pytest.approx(46.614e-6, abs=1e-12)
+    assert by_gen['S1D_AUX_INS_V20260319T000000_G20260318T105812'] == \
+        pytest.approx(-19.685e-6, abs=1e-12)
+    assert all(e.range_time_correction == 0.0 for e in table.entries)

@@ -191,7 +191,7 @@ def test_table_mode_leaves_uncorrected_platform_identical(geocode_slc_params,
         assert p['azimuth_timing_offset'][()] == 0.0
         assert p['timing_correction_source'][()].decode() == 'table'
         assert p['timing_correction_table'][()].decode() == \
-            'OPERA_S1_AUX_TIMING_S1C-REF_G20261023T000000'
+            'OPERA_S1_AUX_TIMING_S1C-REF_G20261024T000000'
         assert p['timing_correction_reference_platform'][()].decode() == 'S1C'
         assert p['timing_correction_status'][()].decode() == \
             'S1A not corrected by the table'

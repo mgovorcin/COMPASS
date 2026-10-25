@@ -14,10 +14,13 @@ With T_X the summed timing error of platform X, the correction is
     c_X = -(T_X - T_ref)
 
 in seconds, added to the burst's azimuth (or two-way range) time. Platforms
-not listed in the table are not corrected. Each entry also names the AUX_INS
-generations it was derived for; a burst focused with any other generation is
-"uncovered", which is how a new ESA generation, or an IPF that starts applying
-the bias itself, is caught instead of being corrected twice.
+not listed in the table are not corrected.
+
+The IPF applies the AUX_INS azimuthTimeBias of the generation that focused a
+product (V10, 00_tools/tests/cslc FINDINGS 18), so T_X is per AUX_INS
+generation, not per platform: a platform gets one entry per distinct set of
+aux values, each naming the generations it covers. A burst focused with a
+generation no entry names is "uncovered" and is not corrected silently.
 
 The SAS only reads tables (``load_timing_table``, ``TimingTable.lookup``) and
 turns the runconfig ``processing.timing_correction`` group into one decision
@@ -48,7 +51,7 @@ DEFAULT_RANGE_COMPONENTS = ('rangeCalibration',)
 # The table shipped with COMPASS, used when the runconfig names none
 DEFAULT_TIMING_TABLE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data',
-    'OPERA_S1_AUX_TIMING_S1C-REF_G20261023T000000.json')
+    'OPERA_S1_AUX_TIMING_S1C-REF_G20261024T000000.json')
 
 # Runconfig choices. 'none' rather than 'off': YAML 1.1 reads off as False.
 AZIMUTH_MODES = ('none', 'carrier_phase', 'geometry')
@@ -177,10 +180,11 @@ class TimingTable:
         for entry in in_time:
             if aux_ins_name in entry.aux_ins:
                 return entry
+        known = sorted(n for e in in_time for n in e.aux_ins)
         raise UncoveredBurstError(
             f'{self.name}: {platform} burst focused with AUX_INS '
-            f'{aux_ins_name}, but the entry was derived for '
-            f'{", ".join(in_time[0].aux_ins)}')
+            f'{aux_ins_name}, but the entries were derived for '
+            f'{", ".join(known)}')
 
 
 def parse_aux_name(path):
@@ -284,32 +288,40 @@ def _relative(total, reference_total):
 
 
 def _group_aux_files(aux_files):
-    '''{platform: {'INS': path, 'ITC': path}}, one product of each per platform'''
+    '''{platform: {'INS': [paths], 'ITC': path}}: one AUX_ITC per platform,
+    any number of AUX_INS generations'''
     grouped = {}
     for path in aux_files:
         parts = parse_aux_name(path)
-        slot = grouped.setdefault(parts['platform'], {})
-        if parts['type'] in slot:
+        slot = grouped.setdefault(parts['platform'], {'INS': []})
+        if parts['type'] == 'INS':
+            if any(parse_aux_name(p)['name'] == parts['name']
+                   for p in slot['INS']):
+                raise ValueError(f'{parts["name"]} given twice')
+            slot['INS'].append(path)
+        elif 'ITC' in slot:
             raise ValueError(
-                f'Two AUX_{parts["type"]} products for {parts["platform"]}: '
-                f'{slot[parts["type"]]} and {path}. Pass exactly one; list '
-                'other AUX_INS generations the entry should accept with '
-                'also_accept_aux_ins.')
-        slot[parts['type']] = path
+                f'Two AUX_ITC products for {parts["platform"]}: '
+                f'{slot["ITC"]} and {path}. Pass exactly one.')
+        else:
+            slot['ITC'] = path
     return grouped
 
 
 def build_timing_table(aux_files, reference_platform, apply_platforms,
                        generation, range_components=DEFAULT_RANGE_COMPONENTS,
-                       validity=None, also_accept_aux_ins=None):
+                       validity=None):
     '''
     Build a relative timing table from ESA aux products
 
     Parameters
     ----------
     aux_files: list of str
-        AUX_INS and AUX_ITC .SAFE.zip paths: one of each for the reference
-        platform and for every platform in apply_platforms
+        AUX_INS and AUX_ITC .SAFE.zip paths. One AUX_ITC per platform. For
+        the reference platform exactly one AUX_INS: the generation its
+        products carry. For a corrected platform every AUX_INS generation its
+        products may have been focused with; generations with identical
+        values share an entry
     reference_platform: str
         Platform the corrections are relative to, e.g. 'S1C'
     apply_platforms: list of str
@@ -321,10 +333,6 @@ def build_timing_table(aux_files, reference_platform, apply_platforms,
     validity: dict, optional
         {platform: (start, stop)} sensing-time windows; missing or None ends
         stay open
-    also_accept_aux_ins: dict, optional
-        {platform: [aux_ins_name, ...]} further AUX_INS generations the entry
-        covers, e.g. an older generation the IPF used before ESA revised the
-        file in place
 
     Returns
     -------
@@ -342,42 +350,50 @@ def build_timing_table(aux_files, reference_platform, apply_platforms,
     if not apply_platforms:
         raise ValueError('apply_platforms is empty: nothing to correct')
     validity = validity or {}
-    also_accept_aux_ins = also_accept_aux_ins or {}
 
     grouped = _group_aux_files(aux_files)
-    needed = [reference_platform, *apply_platforms]
-    for platform in needed:
-        missing = {'INS', 'ITC'} - set(grouped.get(platform, {}))
+    for platform in [reference_platform, *apply_platforms]:
+        slot = grouped.get(platform, {'INS': []})
+        missing = [t for t in ('INS', 'ITC') if not slot.get(t)]
         if missing:
-            raise ValueError(f'No AUX_{"/AUX_".join(sorted(missing))} given '
-                             f'for {platform}')
+            raise ValueError(f'No AUX_{"/AUX_".join(missing)} given for '
+                             f'{platform}')
+    if len(grouped[reference_platform]['INS']) != 1:
+        raise ValueError(
+            f'Give exactly one AUX_INS for the reference {reference_platform}: '
+            'the generation its products carry')
 
-    def components_of(platform):
-        return read_platform_timing(grouped[platform]['INS'],
-                                    grouped[platform]['ITC'])
-
-    reference = components_of(reference_platform)
+    reference_ins = grouped[reference_platform]['INS'][0]
+    reference = read_platform_timing(reference_ins,
+                                     grouped[reference_platform]['ITC'])
     entries = []
     for platform in apply_platforms:
-        comps = components_of(platform)
+        itc = grouped[platform]['ITC']
         start, stop = validity.get(platform) or (None, None)
-        aux_ins = [parse_aux_name(grouped[platform]['INS'])['name']]
-        aux_ins += [n for n in also_accept_aux_ins.get(platform, [])
-                    if n not in aux_ins]
-        entries.append({
-            'platform': platform,
-            'validityStart': _format_time(start),
-            'validityStop': _format_time(stop),
-            'azimuthTimeCorrection': _relative(
-                _azimuth_total(comps), _azimuth_total(reference)),
-            'rangeTimeCorrection': _relative(
-                _range_total(comps, range_components),
-                _range_total(reference, range_components)),
-            'rangeComponents': list(range_components),
-            'auxIns': aux_ins,
-            'auxItc': parse_aux_name(grouped[platform]['ITC'])['name'],
-            'components': {**comps, 'reference': reference},
-        })
+        # One entry per distinct set of values, covering every generation
+        # that carries it, in order of first generation
+        groups = {}
+        for ins in sorted(grouped[platform]['INS'],
+                          key=lambda p: parse_aux_name(p)['generation']):
+            comps = read_platform_timing(ins, itc)
+            key = tuple(sorted(comps.items()))
+            groups.setdefault(key, (comps, []))[1].append(
+                parse_aux_name(ins)['name'])
+        for comps, aux_ins in groups.values():
+            entries.append({
+                'platform': platform,
+                'validityStart': _format_time(start),
+                'validityStop': _format_time(stop),
+                'azimuthTimeCorrection': _relative(
+                    _azimuth_total(comps), _azimuth_total(reference)),
+                'rangeTimeCorrection': _relative(
+                    _range_total(comps, range_components),
+                    _range_total(reference, range_components)),
+                'rangeComponents': list(range_components),
+                'auxIns': aux_ins,
+                'auxItc': parse_aux_name(itc)['name'],
+                'components': {**comps, 'reference': reference},
+            })
 
     return {
         'productType': PRODUCT_TYPE,
@@ -385,7 +401,7 @@ def build_timing_table(aux_files, reference_platform, apply_platforms,
         'generation': _format_time(generation),
         'referencePlatform': reference_platform,
         'referenceAux': {
-            'auxIns': parse_aux_name(grouped[reference_platform]['INS'])['name'],
+            'auxIns': parse_aux_name(reference_ins)['name'],
             'auxItc': parse_aux_name(grouped[reference_platform]['ITC'])['name'],
         },
         'convention': CONVENTION,
@@ -394,7 +410,7 @@ def build_timing_table(aux_files, reference_platform, apply_platforms,
 
 
 def timing_table_name(reference_platform, generation):
-    '''File stem of a table, e.g. OPERA_S1_AUX_TIMING_S1C-REF_G20261023T000000'''
+    '''File stem of a table, e.g. OPERA_S1_AUX_TIMING_S1C-REF_G20261024T000000'''
     return (f'{PRODUCT_TYPE}_{reference_platform}-REF_'
             f'G{generation:%Y%m%dT%H%M%S}')
 
@@ -497,8 +513,8 @@ def load_timing_table(path):
     ------
     ValueError
         If the file is not a valid table: wrong productType, missing or
-        mistyped fields, the reference platform listed as corrected, or two
-        entries for one platform with overlapping validity
+        mistyped fields, the reference platform listed as corrected, or one
+        AUX_INS generation claimed by two entries whose validity overlaps
     '''
     with open(path) as f:
         try:
@@ -523,9 +539,11 @@ def load_timing_table(path):
                              'and cannot have an entry')
     for i, a in enumerate(entries):
         for b in entries[i + 1:]:
-            if a.platform == b.platform and _windows_overlap(a, b):
-                raise ValueError(f'{path}: two {a.platform} entries overlap in '
-                                 'validity')
+            shared = set(a.aux_ins) & set(b.aux_ins)
+            if a.platform == b.platform and shared and _windows_overlap(a, b):
+                raise ValueError(
+                    f'{path}: two {a.platform} entries claim '
+                    f'{", ".join(sorted(shared))} with overlapping validity')
 
     return TimingTable(
         name=raw['name'],
@@ -719,8 +737,11 @@ def get_parser():
                     'timing corrections relative to a reference platform, '
                     'from ESA AUX_INS and AUX_ITC products.')
     parser.add_argument('aux_files', nargs='+',
-                        help='AUX_INS and AUX_ITC .SAFE.zip files, one of each '
-                             'per platform used')
+                        help='AUX_INS and AUX_ITC .SAFE.zip files: one AUX_ITC '
+                             'per platform, one AUX_INS for the reference, and '
+                             'every AUX_INS generation of a corrected platform '
+                             '(s1_download_aux --type AUX_INS --platform S1D '
+                             '--all)')
     parser.add_argument('--reference', required=True,
                         help='Reference platform, e.g. S1C')
     parser.add_argument('--apply', nargs='+', required=True,
@@ -734,9 +755,6 @@ def get_parser():
                         default=[], metavar='PLATFORM=START[/STOP]',
                         help='Sensing-time window for a platform, ISO dates; '
                              'open-ended by default')
-    parser.add_argument('--also-accept-aux-ins', action='append', default=[],
-                        metavar='AUX_INS_NAME',
-                        help='Further AUX_INS generation an entry covers')
     parser.add_argument('--generation', type=datetime.datetime.fromisoformat,
                         default=None,
                         help='Table generation time, ISO (default: now, UTC)')
@@ -750,15 +768,10 @@ def main(argv=None):
     args = get_parser().parse_args(argv)
     generation = args.generation or datetime.datetime.now(
         datetime.timezone.utc).replace(tzinfo=None, microsecond=0)
-    also = {}
-    for name in args.also_accept_aux_ins:
-        also.setdefault(parse_aux_name(name)['platform'], []).append(
-            parse_aux_name(name)['name'])
     table = build_timing_table(
         args.aux_files, args.reference, args.apply, generation,
         range_components=args.range_components,
-        validity=dict(args.validity),
-        also_accept_aux_ins=also)
+        validity=dict(args.validity))
     path = write_timing_table(table, args.out_dir)
     print(path)
     return path

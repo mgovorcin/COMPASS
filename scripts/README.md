@@ -155,7 +155,7 @@ scripts/run_cslc.sh <GRANULE> --workdir DIR --skip-staging --az-timing carrier_p
 
 # the same from your own table (built with s1_timing_table.py)
 scripts/run_cslc.sh <GRANULE> --workdir DIR --skip-staging --az-timing carrier_phase \
-    --timing-table OPERA_S1_AUX_TIMING_S1C-REF_G20261023T000000.json
+    --timing-table OPERA_S1_AUX_TIMING_S1C-REF_G20261024T000000.json
 
 # a constant offset for every burst; geometry unless --az-timing says otherwise
 scripts/run_cslc.sh <GRANULE> --workdir DIR --skip-staging --az-time-offset 4.6614e-5
