@@ -547,15 +547,18 @@ def test_normalize_refuses_both_styles():
 
 
 def test_packaged_table_is_the_s1d_production_table():
-    '''S1D relative to S1C, every S1D AUX_INS generation on SAR-MPC: the
-    bias-0 ones at -19.685 us, the -66.299 us ones at +46.614 us'''
+    '''S1D relative to S1C, built from the -66.299 us AUX_INS generations only:
+    every distributed S1D SLC (first acquisitions 2026-04-16) names one of
+    them. The bias-0 commissioning generations are left out on purpose, so a
+    product focused with one stops as uncovered rather than getting an
+    untested correction.'''
     table = tc.load_timing_table(tc.DEFAULT_TIMING_TABLE)
     assert table.reference_platform == 'S1C'
     assert table.platforms == ['S1D']
-    by_gen = {n: e.azimuth_time_correction
-              for e in table.entries for n in e.aux_ins}
-    assert len(by_gen) == 9
-    assert by_gen[AUX_INS['S1D']] == pytest.approx(46.614e-6, abs=1e-12)
-    assert by_gen['S1D_AUX_INS_V20260319T000000_G20260318T105812'] == \
-        pytest.approx(-19.685e-6, abs=1e-12)
-    assert all(e.range_time_correction == 0.0 for e in table.entries)
+    (entry,) = table.entries
+    assert entry.azimuth_time_correction == pytest.approx(46.614e-6, abs=1e-12)
+    assert entry.range_time_correction == 0.0
+    assert len(entry.aux_ins) == 4 and AUX_INS['S1D'] in entry.aux_ins
+    with pytest.raises(tc.UncoveredBurstError):
+        table.lookup('S1D', WHEN,
+                     'S1D_AUX_INS_V20260319T000000_G20260318T105812')
