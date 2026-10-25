@@ -167,6 +167,8 @@ def test_default_run_records_no_timing_correction(geocode_slc_params):
         assert p['range_timing_offset'][()] == 0.0
         assert p['timing_correction_source'][()].decode() == 'none'
         assert p['timing_correction_status'][()].decode() == 'not requested'
+        assert p['azimuth_timing_swath_residual'][()] == 0.0
+        assert p['range_timing_swath_residual'][()] == 0.0
 
 
 @pytest.mark.order(2)

@@ -407,11 +407,13 @@ def test_cli_help():
 # --------------------------------------------------------------------------- #
 # per-burst resolution
 # --------------------------------------------------------------------------- #
-def burst(platform='S1D', aux_ins_name=AUX_INS['S1D'], sensing_start=WHEN):
-    '''The three attributes resolve_burst_timing reads off a burst'''
+def burst(platform='S1D', aux_ins_name=AUX_INS['S1D'], sensing_start=WHEN,
+          swath_name='iw2'):
+    '''The four attributes resolve_burst_timing reads off a burst'''
     return types.SimpleNamespace(platform_id=platform,
                                  aux_ins_name=aux_ins_name,
-                                 sensing_start=sensing_start)
+                                 sensing_start=sensing_start,
+                                 swath_name=swath_name)
 
 
 def params(**kwargs):
@@ -562,3 +564,115 @@ def test_packaged_table_is_the_s1d_production_table():
     with pytest.raises(tc.UncoveredBurstError):
         table.lookup('S1D', WHEN,
                      'S1D_AUX_INS_V20260319T000000_G20260318T105812')
+
+
+# --------------------------------------------------------------------------- #
+# per-swath residuals
+# --------------------------------------------------------------------------- #
+RESIDUALS = {'S1D': {'IW1': {'azimuth': 0.4e-6},
+                     'IW3': {'azimuth': -0.2e-6, 'range': 1e-10}}}
+RESIDUAL_SOURCE = 'ESD median, frame 46290, test'
+
+
+def residual_table(tmp_path):
+    return written(tmp_path, s1d_table(swath_residuals=RESIDUALS,
+                                       swath_residual_source=RESIDUAL_SOURCE))
+
+
+def test_residuals_ride_on_the_entry(tmp_path):
+    (entry,) = residual_table(tmp_path).entries
+    assert entry.azimuth_time_correction == pytest.approx(46.614e-6,
+                                                          abs=1e-12)
+    assert entry.swath_residual_source == RESIDUAL_SOURCE
+    assert entry.residual('iw1') == (0.4e-6, 0.0)
+    assert entry.residual('IW3') == (-0.2e-6, 1e-10)
+    assert entry.residual('iw2') == (0.0, 0.0)
+
+
+def test_residuals_attach_to_every_generation_entry(s1d_history):
+    files = [str(AUX_INS_DIR / f'{AUX_INS["S1C"]}.SAFE.zip'),
+             str(AUX_ITC_DIR / f'{AUX_ITC["S1C"]}.SAFE.zip'),
+             str(AUX_ITC_DIR / f'{AUX_ITC["S1D"]}.SAFE.zip'), *s1d_history]
+    table = tc.build_timing_table(files, 'S1C', ['S1D'], GENERATION,
+                                  swath_residuals=RESIDUALS,
+                                  swath_residual_source=RESIDUAL_SOURCE)
+    assert all(e['swathResiduals'] == RESIDUALS['S1D']
+               for e in table['entries'])
+
+
+def test_no_residuals_writes_no_residual_keys():
+    """Tables without residuals stay exactly as before"""
+    (entry,) = s1d_table()['entries']
+    assert 'swathResiduals' not in entry
+    assert 'swathResidualSource' not in entry
+
+
+@pytest.mark.parametrize('kwargs,match', [
+    ({'swath_residuals': RESIDUALS}, 'need a swath_residual_source'),
+    ({'swath_residuals': {'S1A': RESIDUALS['S1D']},
+      'swath_residual_source': 'x'}, 'which are not corrected'),
+    ({'swath_residuals': {'S1D': {'IW4': {'azimuth': 1e-6}}},
+      'swath_residual_source': 'x'}, 'swath must be one of'),
+    ({'swath_residuals': {'S1D': {'IW1': {'elevation': 1e-6}}},
+      'swath_residual_source': 'x'}, 'axis must be one of'),
+    ({'swath_residuals': {'S1D': {'IW1': {'azimuth': '0.4us'}}},
+      'swath_residual_source': 'x'}, 'must be a number'),
+])
+def test_build_rejects_bad_residuals(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        s1d_table(**kwargs)
+
+
+@pytest.mark.parametrize('mutate,match', [
+    (lambda t: t['entries'][0].update(swathResiduals=RESIDUALS['S1D']),
+     'need a swathResidualSource'),
+    (lambda t: t['entries'][0].update(swathResiduals={'IW9': {'azimuth': 1}},
+                                      swathResidualSource='x'),
+     'swath must be one of'),
+])
+def test_load_rejects_bad_residuals(tmp_path, mutate, match):
+    with pytest.raises(ValueError, match=match):
+        tc.load_timing_table(raw_table(tmp_path, mutate))
+
+
+def test_resolve_adds_the_swath_residual(tmp_path):
+    table = residual_table(tmp_path)
+    timing = tc.resolve_burst_timing(
+        burst(swath_name='iw1'),
+        params(azimuth_mode='carrier_phase', range_mode='geometry'), table)
+    assert timing.azimuth_offset == pytest.approx(46.614e-6 + 0.4e-6,
+                                                  abs=1e-12)
+    assert timing.azimuth_swath_residual == pytest.approx(0.4e-6)
+    assert timing.range_offset == 0.0
+
+
+def test_resolve_swath_without_residual_gets_the_aux_value(tmp_path):
+    timing = tc.resolve_burst_timing(
+        burst(swath_name='iw2'), params(azimuth_mode='carrier_phase'),
+        residual_table(tmp_path))
+    assert timing.azimuth_offset == pytest.approx(46.614e-6, abs=1e-12)
+    assert timing.azimuth_swath_residual == 0.0
+
+
+def test_resolve_residual_only_on_requested_axes(tmp_path):
+    """IW3 has a range residual, but range_mode none applies no range"""
+    timing = tc.resolve_burst_timing(
+        burst(swath_name='iw3'), params(azimuth_mode='carrier_phase'),
+        residual_table(tmp_path))
+    assert timing.azimuth_offset == pytest.approx(46.614e-6 - 0.2e-6,
+                                                  abs=1e-12)
+    assert timing.range_offset == 0.0
+    assert timing.range_swath_residual == 0.0
+
+
+def test_cli_reads_swath_residuals(tmp_path):
+    spec = tmp_path / 'residuals.json'
+    spec.write_text(json.dumps({'source': RESIDUAL_SOURCE, **RESIDUALS}))
+    out = tmp_path / 'out'
+    out.mkdir()
+    path = tc.main([*aux_files('S1C', 'S1D'), '--reference', 'S1C',
+                    '--apply', 'S1D', '--generation', '2026-10-24',
+                    '--swath-residuals', str(spec), '-o', str(out)])
+    (entry,) = tc.load_timing_table(path).entries
+    assert entry.swath_residual_source == RESIDUAL_SOURCE
+    assert entry.residual('iw1') == (0.4e-6, 0.0)

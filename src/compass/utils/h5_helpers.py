@@ -729,6 +729,15 @@ def _timing_meta_items(burst_timing):
              "Platform the table's corrections are relative to"),
         Meta('timing_correction_status', burst_timing.status,
              "Why the timing offsets are what they are"),
+        Meta('azimuth_timing_swath_residual',
+             burst_timing.azimuth_swath_residual,
+             ("Part of azimuth_timing_offset that is a measured per-swath "
+              "residual (e.g. ESD) rather than from the AUX files"),
+             {'units': 'seconds'}),
+        Meta('range_timing_swath_residual', burst_timing.range_swath_residual,
+             ("Part of range_timing_offset that is a measured per-swath "
+              "residual rather than from the AUX files"),
+             {'units': 'seconds'}),
     ]
 
 

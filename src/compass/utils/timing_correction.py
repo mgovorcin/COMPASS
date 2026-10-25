@@ -59,6 +59,10 @@ RANGE_MODES = ('none', 'geometry')
 
 _SPEED_OF_LIGHT = 299792458.0
 
+# Swaths a residual may name, and what it may hold
+SWATHS = ('IW1', 'IW2', 'IW3')
+_RESIDUAL_AXES = ('azimuth', 'range')
+
 # IW channels whose values must agree before one instrument-wide number is used
 _IW_CHANNELS = [(swath, pol) for swath in ('iw1', 'iw2', 'iw3')
                 for pol in ('vv', 'vh', 'hh', 'hv')]
@@ -96,6 +100,12 @@ class TimingEntry:
         The raw aux values used, for provenance
     range_components: tuple of str
         Which of RANGE_COMPONENTS were summed into the range correction
+    swath_residuals: dict
+        {'IW1': {'azimuth': s, 'range': s}, ...}: measured per-swath residuals
+        [s] added on top of the aux-derived correction (e.g. ESD medians); a
+        swath or axis left out adds 0
+    swath_residual_source: str or None
+        Where the residuals came from; required when there are any
     '''
     platform: str
     validity_start: datetime.datetime | None
@@ -106,6 +116,14 @@ class TimingEntry:
     aux_itc: str | None
     components: dict = field(default_factory=dict, compare=False)
     range_components: tuple = DEFAULT_RANGE_COMPONENTS
+    swath_residuals: dict = field(default_factory=dict, compare=False)
+    swath_residual_source: str | None = None
+
+    def residual(self, swath):
+        '''(azimuth, range) residual [s] for a swath such as 'iw2'; 0 if none'''
+        values = self.swath_residuals.get(str(swath).upper(), {})
+        return (float(values.get('azimuth', 0.0)),
+                float(values.get('range', 0.0)))
 
     def covers_time(self, sensing_time):
         '''True if sensing_time falls in [validity_start, validity_stop)'''
@@ -310,7 +328,8 @@ def _group_aux_files(aux_files):
 
 def build_timing_table(aux_files, reference_platform, apply_platforms,
                        generation, range_components=DEFAULT_RANGE_COMPONENTS,
-                       validity=None):
+                       validity=None, swath_residuals=None,
+                       swath_residual_source=None):
     '''
     Build a relative timing table from ESA aux products
 
@@ -333,6 +352,12 @@ def build_timing_table(aux_files, reference_platform, apply_platforms,
     validity: dict, optional
         {platform: (start, stop)} sensing-time windows; missing or None ends
         stay open
+    swath_residuals: dict, optional
+        {platform: {'IW1': {'azimuth': s, 'range': s}, ...}}: measured
+        per-swath residuals [s] added on top of the aux-derived correction,
+        attached to every entry of that platform
+    swath_residual_source: str, optional
+        Where the residuals came from; required with swath_residuals
 
     Returns
     -------
@@ -350,6 +375,16 @@ def build_timing_table(aux_files, reference_platform, apply_platforms,
     if not apply_platforms:
         raise ValueError('apply_platforms is empty: nothing to correct')
     validity = validity or {}
+    swath_residuals = swath_residuals or {}
+    if swath_residuals:
+        if not swath_residual_source:
+            raise ValueError('swath_residuals need a swath_residual_source')
+        unknown = set(swath_residuals) - set(apply_platforms)
+        if unknown:
+            raise ValueError(f'swath_residuals for {sorted(unknown)}, which '
+                             'are not corrected')
+        for platform, residuals in swath_residuals.items():
+            _check_swath_residuals(residuals, f'swath_residuals[{platform}]')
 
     grouped = _group_aux_files(aux_files)
     for platform in [reference_platform, *apply_platforms]:
@@ -380,6 +415,10 @@ def build_timing_table(aux_files, reference_platform, apply_platforms,
             groups.setdefault(key, (comps, []))[1].append(
                 parse_aux_name(ins)['name'])
         for comps, aux_ins in groups.values():
+            extra = {}
+            if platform in swath_residuals:
+                extra = {'swathResiduals': swath_residuals[platform],
+                         'swathResidualSource': swath_residual_source}
             entries.append({
                 'platform': platform,
                 'validityStart': _format_time(start),
@@ -393,6 +432,7 @@ def build_timing_table(aux_files, reference_platform, apply_platforms,
                 'auxIns': aux_ins,
                 'auxItc': parse_aux_name(itc)['name'],
                 'components': {**comps, 'reference': reference},
+                **extra,
             })
 
     return {
@@ -450,6 +490,26 @@ _REQUIRED_ENTRY_KEYS = ('platform', 'validityStart', 'validityStop',
                         'rangeComponents', 'auxIns', 'auxItc')
 
 
+def _check_swath_residuals(residuals, where):
+    '''Raise ValueError unless residuals is {swath: {axis: seconds}}'''
+    if not isinstance(residuals, dict) or not residuals:
+        raise ValueError(f'{where} must be a non-empty map of swaths')
+    for swath, values in residuals.items():
+        if swath not in SWATHS:
+            raise ValueError(f'{where}: swath must be one of {SWATHS}, got '
+                             f'{swath!r}')
+        if not isinstance(values, dict) or not values:
+            raise ValueError(f'{where}.{swath} must map azimuth/range to '
+                             'seconds')
+        for axis, value in values.items():
+            if axis not in _RESIDUAL_AXES:
+                raise ValueError(f'{where}.{swath}: axis must be one of '
+                                 f'{_RESIDUAL_AXES}, got {axis!r}')
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f'{where}.{swath}.{axis} must be a number '
+                                 'in seconds')
+
+
 def _entry_from_json(raw, i):
     where = f'entries[{i}]'
     missing = [k for k in _REQUIRED_ENTRY_KEYS if k not in raw]
@@ -470,6 +530,13 @@ def _entry_from_json(raw, i):
     if not set(range_components) <= set(RANGE_COMPONENTS):
         raise ValueError(f'{where}.rangeComponents must be a subset of '
                          f'{RANGE_COMPONENTS}')
+    residuals = raw.get('swathResiduals') or {}
+    source = raw.get('swathResidualSource')
+    if residuals:
+        _check_swath_residuals(residuals, f'{where}.swathResiduals')
+        if not isinstance(source, str) or not source:
+            raise ValueError(f'{where}.swathResiduals need a '
+                             'swathResidualSource')
 
     entry = TimingEntry(
         platform=raw['platform'],
@@ -482,6 +549,8 @@ def _entry_from_json(raw, i):
         aux_itc=raw['auxItc'],
         components=dict(raw.get('components', {})),
         range_components=range_components,
+        swath_residuals=dict(residuals),
+        swath_residual_source=source if residuals else None,
     )
     if (entry.validity_start is not None and entry.validity_stop is not None
             and entry.validity_stop <= entry.validity_start):
@@ -576,6 +645,9 @@ class BurstTiming:
         Platform the table's corrections are relative to
     status: str
         Why the offsets are what they are, for the product metadata
+    azimuth_swath_residual, range_swath_residual: float
+        The part of azimuth_offset / range_offset [s] that came from the
+        table's per-swath residual rather than the aux files
     '''
     azimuth_mode: str = 'none'
     azimuth_offset: float = 0.0
@@ -585,6 +657,8 @@ class BurstTiming:
     table_name: str | None = None
     reference_platform: str | None = None
     status: str = 'not requested'
+    azimuth_swath_residual: float = 0.0
+    range_swath_residual: float = 0.0
 
     @property
     def geometry_azimuth_offset(self):
@@ -658,7 +732,8 @@ def resolve_burst_timing(burst, timing_params, table=None):
     Parameters
     ----------
     burst: Sentinel1BurstSlc
-        Burst to correct; platform_id, sensing_start and aux_ins_name are read
+        Burst to correct; platform_id, sensing_start, aux_ins_name and
+        swath_name are read
     timing_params: types.SimpleNamespace
         processing.timing_correction, after normalize_timing_params
     table: TimingTable or None
@@ -680,12 +755,15 @@ def resolve_burst_timing(burst, timing_params, table=None):
     az_mode = timing_params.azimuth_mode
     rg_mode = timing_params.range_mode
 
-    def pick(az_value, rg_value, **kwargs):
+    def pick(az_value, rg_value, az_residual=0.0, rg_residual=0.0, **kwargs):
+        az_on, rg_on = az_mode != 'none', rg_mode != 'none'
         return BurstTiming(
             azimuth_mode=az_mode,
-            azimuth_offset=float(az_value) if az_mode != 'none' else 0.0,
+            azimuth_offset=float(az_value) + az_residual if az_on else 0.0,
             range_mode=rg_mode,
-            range_offset=float(rg_value) if rg_mode != 'none' else 0.0,
+            range_offset=float(rg_value) + rg_residual if rg_on else 0.0,
+            azimuth_swath_residual=az_residual if az_on else 0.0,
+            range_swath_residual=rg_residual if rg_on else 0.0,
             **kwargs)
 
     if timing_params.offset_source == 'constant':
@@ -712,8 +790,9 @@ def resolve_burst_timing(burst, timing_params, table=None):
     if entry is None:
         return pick(0.0, 0.0, status=f'{burst.platform_id} not corrected by '
                                      'the table', **common)
+    az_residual, rg_residual = entry.residual(burst.swath_name)
     return pick(entry.azimuth_time_correction, entry.range_time_correction,
-                status='applied', **common)
+                az_residual, rg_residual, status='applied', **common)
 
 
 def _platform_window(text):
@@ -755,6 +834,10 @@ def get_parser():
                         default=[], metavar='PLATFORM=START[/STOP]',
                         help='Sensing-time window for a platform, ISO dates; '
                              'open-ended by default')
+    parser.add_argument('--swath-residuals', default=None, metavar='JSON',
+                        help='Measured per-swath residuals added on top of the '
+                             'aux-derived correction: {"source": "...", '
+                             '"S1D": {"IW1": {"azimuth": seconds}, ...}}')
     parser.add_argument('--generation', type=datetime.datetime.fromisoformat,
                         default=None,
                         help='Table generation time, ISO (default: now, UTC)')
@@ -768,10 +851,16 @@ def main(argv=None):
     args = get_parser().parse_args(argv)
     generation = args.generation or datetime.datetime.now(
         datetime.timezone.utc).replace(tzinfo=None, microsecond=0)
+    residuals, source = None, None
+    if args.swath_residuals:
+        with open(args.swath_residuals) as f:
+            residuals = json.load(f)
+        source = residuals.pop('source', None)
     table = build_timing_table(
         args.aux_files, args.reference, args.apply, generation,
         range_components=args.range_components,
-        validity=dict(args.validity))
+        validity=dict(args.validity), swath_residuals=residuals,
+        swath_residual_source=source)
     path = write_timing_table(table, args.out_dir)
     print(path)
     return path
