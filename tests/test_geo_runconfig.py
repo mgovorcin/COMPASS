@@ -3,13 +3,14 @@ Test how GeoRunConfig loads processing.timing_correction: the deprecated
 azimuth_time_offset, the table file, and bursts the table does not cover,
 all of which must fail at load time rather than mid-run
 '''
+import dataclasses
 import json
 
 import journal
 import pytest
 
 from compass.utils import timing_correction as tc
-from compass.utils.geo_runconfig import GeoRunConfig
+from compass.utils.geo_runconfig import GeoRunConfig, timing_table_of
 
 # The AUX_INS that focused the Rosamond test SAFE (S1A, 2022-10-16)
 TEST_SAFE_AUX_INS = 'S1A_AUX_INS_V20190228T092500_G20211103T111906'
@@ -145,3 +146,27 @@ def test_as_dict_names_the_table(geocode_slc_params, tmp_path):
     cfg = load(write_cfg(geocode_slc_params, tmp_path,
                          timing={'azimuth_mode': 'carrier_phase'}))
     assert cfg.as_dict()['timing_table'] == cfg.timing_table.name
+
+
+def test_timing_table_of_config_built_without_load_from_yaml(
+        geocode_slc_params, tmp_path):
+    """cslc-batch builds GeoRunConfig directly, so timing_table is None; the
+    SAS must still find the table. Regression: V5 arms failed with "no
+    timing table was loaded" (2026-10-24)."""
+    cfg = load(write_cfg(geocode_slc_params, tmp_path,
+                         timing={'azimuth_mode': 'carrier_phase'}))
+    bare = dataclasses.replace(cfg, timing_table=None)
+    table = timing_table_of(bare)
+    assert table.name == cfg.timing_table.name
+
+
+def test_timing_table_of_keeps_the_loaded_table(geocode_slc_params, tmp_path):
+    cfg = load(write_cfg(geocode_slc_params, tmp_path,
+                         timing={'azimuth_mode': 'carrier_phase'}))
+    assert timing_table_of(cfg) is cfg.timing_table
+
+
+def test_timing_table_of_is_none_when_not_requested(geocode_slc_params,
+                                                    tmp_path):
+    cfg = load(write_cfg(geocode_slc_params, tmp_path))
+    assert timing_table_of(dataclasses.replace(cfg, timing_table=None)) is None

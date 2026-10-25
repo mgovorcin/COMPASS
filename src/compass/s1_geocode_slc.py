@@ -18,7 +18,7 @@ from compass.s1_cslc_qa import QualityAssuranceCSLC
 from compass.utils.azimuth_phase import apply_azimuth_phase_offset
 from compass.utils.browse_image import make_browse_image
 from compass.utils.elevation_antenna_pattern import apply_eap_correction
-from compass.utils.geo_runconfig import GeoRunConfig
+from compass.utils.geo_runconfig import GeoRunConfig, timing_table_of
 from compass.utils.h5_helpers import (algorithm_metadata_to_h5group,
                                       corrections_to_h5group,
                                       identity_to_h5group,
@@ -78,6 +78,7 @@ def run(cfg: GeoRunConfig):
     threshold = cfg.geo2rdr_params.threshold
     iters = cfg.geo2rdr_params.numiter
     flatten = cfg.geocoding_params.flatten
+    timing_table = timing_table_of(cfg)
 
     for burst_id, bursts in bursts_grouping_generator(cfg.bursts):
         burst = bursts[0]
@@ -106,7 +107,7 @@ def run(cfg: GeoRunConfig):
         # correction LUTs; a carrier-phase offset changes the azimuth carrier
         # only (below), leaving sampling and geolocation alone.
         timing = resolve_burst_timing(burst, cfg.timing_params,
-                                      cfg.timing_table)
+                                      timing_table)
         az_time_offset = timing.geometry_azimuth_offset
         rg_offset = timing.geometry_range_offset_meters
         az_phase_offset = timing.carrier_phase_azimuth_offset

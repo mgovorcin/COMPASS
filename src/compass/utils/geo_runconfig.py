@@ -83,6 +83,28 @@ def load_timing_for_bursts(sns, bursts):
     return table
 
 
+def timing_table_of(cfg):
+    '''
+    The run's timing table
+
+    The one GeoRunConfig.load_from_yaml loaded, or, for a GeoRunConfig built
+    some other way (cslc-batch constructs one per burst), loaded now with the
+    same normalization and per-burst checks
+
+    Parameters
+    ----------
+    cfg: GeoRunConfig
+
+    Returns
+    -------
+    TimingTable or None
+        None when no correction is requested or offset_source is constant
+    '''
+    if cfg.timing_table is not None:
+        return cfg.timing_table
+    return load_timing_for_bursts(cfg.groups, cfg.bursts)
+
+
 @dataclass(frozen=True)
 class GeoRunConfig(RunConfig):
     '''dataclass containing GSLC runconfig'''
