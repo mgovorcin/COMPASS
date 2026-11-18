@@ -725,6 +725,27 @@ def algorithm_metadata_to_h5group(parent_group, is_static_layers=False):
         add_dataset_and_attrs(algorithm_group, meta_item)
 
 
+def lut_axis(start, spacing, size):
+    '''
+    Coordinates of the nodes of an isce3 LUT2d axis
+
+    Parameters
+    ----------
+    start: float
+        Coordinate of the first node
+    spacing: float
+        Node spacing
+    size: int
+        Number of nodes
+
+    Returns
+    -------
+    np.ndarray
+        start + i * spacing for i = 0 ... size - 1
+    '''
+    return start + np.arange(size, dtype=np.float64) * spacing
+
+
 def corrections_to_h5group(parent_group, burst, cfg, rg_lut, az_lut,
                            scratch_path, weather_model_path=None,
                            delay_type='dry'):
@@ -765,12 +786,8 @@ def corrections_to_h5group(parent_group, burst, cfg, rg_lut, az_lut,
     correction_group = parent_group.require_group('timing_corrections')
 
     # create slant range and azimuth vectors shared by the LUTs
-    x_end = rg_lut.x_start + rg_lut.width * rg_lut.x_spacing
-    slant_range = np.linspace(rg_lut.x_start, x_end,
-                              rg_lut.width, dtype=np.float64)
-    y_end = az_lut.y_start + az_lut.length * az_lut.y_spacing
-    azimuth = np.linspace(az_lut.y_start, y_end,
-                          az_lut.length, dtype=np.float64)
+    slant_range = lut_axis(rg_lut.x_start, rg_lut.x_spacing, rg_lut.width)
+    azimuth = lut_axis(az_lut.y_start, az_lut.y_spacing, az_lut.length)
 
     # correction LUTs axis and doppler correction LUTs
     desc = 'correction as a function of slant range and azimuth time'
