@@ -107,16 +107,19 @@ class CarrierPolynomial:
     '''
     Azimuth carrier as COMPASS geocodes it: the 2-D polynomial fit of
     s1-reader's get_az_carrier_poly (azimuth order 5, range order 3,
-    every 50th line and 500th sample)
+    every 50th line and 500th sample). With time_offset dt it is the fit
+    of the carrier of the burst shifted by dt, get_az_carrier_poly(offset=
+    dt / azimuth_time_interval).
     '''
 
     AZ_ORDER, RG_ORDER, X_STEP, Y_STEP = 5, 3, 500, 50
 
-    def __init__(self, carrier, n_lines, n_samples, range_pixel_spacing):
+    def __init__(self, carrier, n_lines, n_samples, range_pixel_spacing,
+                 time_offset=0.0):
         x = np.arange(0, int(n_samples), self.X_STEP)
         y = np.arange(0, int(n_lines), self.Y_STEP)
         x_mesh, y_mesh = np.meshgrid(x, y)
-        values = carrier(carrier.sensing_start + (y_mesh + 1) * carrier.dta,
+        values = carrier(carrier.sensing_start + (y_mesh + 1) * carrier.dta + time_offset,
                          carrier.r0 + x_mesh * range_pixel_spacing)
         rg = (carrier.r0 + (x_mesh + 1) * range_pixel_spacing).ravel()
         az = (carrier.sensing_start + (y_mesh + 1) * carrier.dta).ravel()
@@ -140,7 +143,7 @@ class CarrierPolynomial:
             (np.asarray(r) - self.x_min) / self.x_norm, self.coeffs)
 
 
-def carrier_from_product(h5, orbit, epoch):
+def carrier_from_product(h5, orbit, epoch, time_offset=0.0):
     '''
     Azimuth carrier polynomial of a CSLC-S1 product
 
@@ -152,6 +155,8 @@ def carrier_from_product(h5, orbit, epoch):
         Orbit of the product
     epoch: datetime.datetime
         Orbit reference epoch; carrier times are seconds from it
+    time_offset: float
+        Azimuth time shift of the burst [s] (see CarrierPolynomial)
 
     Returns
     -------
@@ -170,7 +175,8 @@ def carrier_from_product(h5, orbit, epoch):
                           meta['azimuth_steering_rate'][()],
                           np.linalg.norm(vel), meta['wavelength'][()])
     return CarrierPolynomial(carrier, n_lines, n_samples,
-                             float(meta['range_pixel_spacing'][()]))
+                             float(meta['range_pixel_spacing'][()]),
+                             time_offset=time_offset)
 
 
 class RegularLUT:
@@ -337,8 +343,9 @@ def _sampled_time(h5):
     return sampled
 
 
-def postcorrect(cslc_in, cslc_out, dem_path, time_shift, resample=False,
-                block_rows=512, coarse_step=24, polarization=None):
+def postcorrect(cslc_in, cslc_out, dem_path, time_shift=None, resample=False,
+                block_rows=512, coarse_step=24, polarization=None,
+                carrier_offset=None):
     '''
     Move the azimuth sample time of a geocoded CSLC-S1 product by a
     per-pixel time shift, writing a corrected copy
@@ -352,21 +359,32 @@ def postcorrect(cslc_in, cslc_out, dem_path, time_shift, resample=False,
         azimuth_carrier_phase replaced
     dem_path: str
         DEM for the pixel heights
-    time_shift: callable
+    time_shift: callable or None
         time_shift(h5, t_zd, r) -> azimuth time shift [s] at zero-Doppler
         time t_zd and slant range r
     resample: bool
-        If True, also move the image (resample); else phase screen only
+        If True, also move the image (resample); else phase screen only.
+        Needs time_shift.
     block_rows: int
         Rows processed at a time
     coarse_step: int
         Coarse geo2rdr grid spacing in pixels
     polarization: str or None
         Data layer to correct; the first polarization layer if None
+    carrier_offset: float or None
+        Phase-only shift of the whole burst by this azimuth time [s]: the
+        phase screen is P1(t_s) - P0(t_s), P1 the carrier of the shifted
+        burst. Used instead of time_shift.
     '''
+    if (time_shift is None) == (carrier_offset is None):
+        raise ValueError('give exactly one of time_shift and carrier_offset')
+    if resample and time_shift is None:
+        raise ValueError('resample needs time_shift')
     with h5py.File(cslc_in, 'r') as h5:
         orbit, epoch = orbit_from_product(h5)
         carrier = carrier_from_product(h5, orbit, epoch)
+        shifted = (carrier_from_product(h5, orbit, epoch, time_offset=carrier_offset)
+                   if carrier_offset is not None else None)
         sampled = _sampled_time(h5)
         pol = polarization or next(k for k in h5['data']
                                    if k in ('VV', 'HH', 'VH', 'HV'))
@@ -399,7 +417,10 @@ def postcorrect(cslc_in, cslc_out, dem_path, time_shift, resample=False,
             r_p = fine(r_c) + fine(coarse['dr_dh']) * dh
             t_p = fine(t_c) + fine(coarse['dt_dh']) * dh
             ts_p = sampled(t_p, r_p)
-            phi_new = carrier(ts_p + time_shift(h5, t_p, r_p), r_p)
+            if shifted is not None:
+                phi_new = shifted(ts_p, r_p)
+            else:
+                phi_new = carrier(ts_p + time_shift(h5, t_p, r_p), r_p)
             dphi = wrap(phi_new - carrier(ts_p, r_p)).astype(np.float32)
             carr_out[out_rows] = wrap(carr[out_rows] + dphi)
             valid = np.isfinite(z[out_rows])
