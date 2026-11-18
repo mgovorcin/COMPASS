@@ -15,6 +15,27 @@ from compass.utils.helpers import open_raster
 from compass.utils.helpers import write_raster
 
 
+def azimuth_lut_data(bistatic_delay, az_fm_mismatch):
+    '''
+    Combine the azimuth corrections into the LUT added to the
+    zero-Doppler azimuth time by isce3 geocodeSlc
+
+    Parameters
+    ----------
+    bistatic_delay: np.ndarray
+        Azimuth bistatic delay [s]
+    az_fm_mismatch: np.ndarray
+        Azimuth FM rate mismatch, s1-reader's dt_FMM [s]
+
+    Returns
+    -------
+    np.ndarray
+        Azimuth correction LUT data [s]: minus the bistatic delay,
+        plus the FM rate mismatch
+    '''
+    return -bistatic_delay + az_fm_mismatch
+
+
 def cumulative_correction_luts(burst, dem_path, tec_path,
                                scratch_path=None,
                                weather_model_path=None,
@@ -79,8 +100,7 @@ def cumulative_correction_luts(burst, dem_path, tec_path,
     if 'dry' in delay_type:
         rg_lut_data += dry_los_tropo
 
-    # Invert signs to correct for convention
-    az_lut_data = -(bistatic_delay.data + az_fm_mismatch.data)
+    az_lut_data = azimuth_lut_data(bistatic_delay.data, az_fm_mismatch.data)
 
     rg_lut = isce3.core.LUT2d(bistatic_delay.x_start,
                               bistatic_delay.y_start,
